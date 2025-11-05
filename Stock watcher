@@ -1,0 +1,491 @@
+StockWatcher/
+├─ app/build.gradle
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'kotlin-kapt'
+}
+
+android {
+    namespace 'com.example.smartstockwatcher'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.smartstockwatcher"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        // For Room annotation processor
+        javaCompileOptions {
+            annotationProcessorOptions { includeCompileClasspath true }
+        }
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    kotlinOptions { jvmTarget = '17' }
+    buildFeatures { compose true }
+    composeOptions { kotlinCompilerExtensionVersion '1.6.0' }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.0"
+
+    // Jetpack Compose
+    implementation "androidx.core:core-ktx:1.12.0"
+    implementation "androidx.activity:activity-compose:1.8.0"
+    implementation "androidx.compose.ui:ui:1.6.0"
+    implementation "androidx.compose.material:material:1.6.0"
+    implementation "androidx.compose.ui:ui-tooling-preview:1.6.0"
+
+    // Retrofit + Moshi
+    implementation 'com.squareup.retrofit2:retrofit:2.9.0'
+    implementation 'com.squareup.retrofit2:converter-moshi:2.9.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.11.0'
+    implementation 'com.squareup.moshi:moshi-kotlin:1.15.0'
+
+    // Coroutines & WorkManager
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+    implementation "androidx.work:work-runtime-ktx:2.8.1"
+
+    // Room
+    implementation "androidx.room:room-runtime:2.6.1"
+    kapt "androidx.room:room-compiler:2.6.1"
+    implementation "androidx.room:room-ktx:2.6.1"
+
+    // Secure prefs
+    implementation 'androidx.security:security-crypto:1.1.0-alpha04'
+
+    // Notifications
+    implementation 'androidx.core:core-ktx:1.12.0'
+}
+
+│  ├─ src/main/AndroidManifest.xml
+<manifest package="com.example.smartstockwatcher" xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application
+        android:allowBackup="true"
+        android:label="SmartStockWatcher"
+        android:theme="@style/Theme.SmartStockWatcher">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+│  ├─ java/com/example/smartstockwatcher/
+│  │   ├─ MainActivity.kt
+// package com.example.smartstockwatcher
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.work.*
+import java.util.concurrent.TimeUnit
+
+class MainActivity : ComponentActivity() {
+    private lateinit var prefs: com.example.smartstockwatcher.prefs.SecurePrefs
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        prefs = com.example.smartstockwatcher.prefs.SecurePrefs(this)
+        setContent {
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    AppContent()
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun AppContent() {
+        var apiKey by remember { mutableStateOf(prefs.apiKey) }
+        var newTicker by remember { mutableStateOf("") }
+
+        Column(modifier = Modifier.padding(16.dp)) {
+            OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("AlphaVantage API Key") }, modifier = Modifier.fillMaxWidth())
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(onClick = {
+                prefs.apiKey = apiKey
+                Toast.makeText(this@MainActivity, "API key saved", Toast.LENGTH_SHORT).show()
+            }) { Text("Save API Key") }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedTextField(value = newTicker, onValueChange = { newTicker = it }, label = { Text("Add ticker (e.g. AAPL)") }, modifier = Modifier.fillMaxWidth())
+            Spacer(modifier = Modifier.height(8.dp))
+            Row {
+                Button(onClick = {
+                    // TODO: persist ticker to DB
+                    Toast.makeText(this@MainActivity, "Ticker add (not implemented in demo)", Toast.LENGTH_SHORT).show()
+                }) { Text("Add Ticker") }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(onClick = { scheduleWork(); Toast.makeText(this@MainActivity, "Worker scheduled every 15min", Toast.LENGTH_SHORT).show() }) { Text("Start Watching") }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(onClick = { WorkManager.getInstance(this@MainActivity).cancelUniqueWork(com.example.smartstockwatcher.worker.StockWorker.WORK_NAME); Toast.makeText(this@MainActivity, "Stopped", Toast.LENGTH_SHORT).show() }) { Text("Stop") }
+            }
+        }
+    }
+
+    private fun scheduleWork() {
+        val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+        val req = PeriodicWorkRequestBuilder<com.example.smartstockwatcher.worker.StockWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(constraints)
+            .build()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(com.example.smartstockwatcher.worker.StockWorker.WORK_NAME, ExistingPeriodicWorkPolicy.REPLACE, req)
+    }
+}
+
+│  │   ├─ ui/* (Compose screens)
+│  │   ├─ data/
+│  │   │   ├─ models.kt
+// package com.example.smartstockwatcher.data
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "tickers")
+data class TickerEntity(
+    @PrimaryKey val symbol: String,
+    val buyThreshold: Double = 0.98, // default: buy when <= 98% of reference
+    val sellThreshold: Double = 1.02 // default: sell when >= 102% of reference
+)
+
+data class Quote(val symbol: String, val current: Double, val previousClose: Double)
+
+│  │   │   ├─ AppDatabase.kt
+// package com.example.smartstockwatcher.data
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+
+@Database(entities = [TickerEntity::class], version = 1, exportSchema = false)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun stockDao(): StockDao
+    companion object {
+        @Volatile private var INSTANCE: AppDatabase? = null
+        fun get(context: Context): AppDatabase =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, "smartstock.db").build().also { INSTANCE = it }
+            }
+    }
+}
+
+│  │   │   ├─ StockDao.kt
+// package com.example.smartstockwatcher.data
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
+
+@Dao
+interface StockDao {
+    @Query("SELECT * FROM tickers")
+    fun allTickersFlow(): Flow<List<TickerEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(ticker: TickerEntity)
+
+    @Query("DELETE FROM tickers WHERE symbol = :symbol")
+    suspend fun delete(symbol: String)
+}
+
+│  │   │   ├─ Repo.kt
+// package com.example.smartstockwatcher.data
+import android.util.Log
+import com.example.smartstockwatcher.net.AlphaVantageApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
+class Repo(private val api: AlphaVantageApi, private val apiKey: String) {
+    suspend fun fetchRecentPrices(symbol: String, days: Int = 60): List<Double> = withContext(Dispatchers.IO) {
+        try {
+            val resp = api.getDaily(symbol, apiKey).execute()
+            if (!resp.isSuccessful || resp.body() == null) return@withContext emptyList()
+            val body = resp.body()!!
+            // body contains keys: "Meta Data" and "Time Series (Daily)"
+            val timeSeriesKey = body.keys.firstOrNull { it.contains("Time Series") } ?: return@withContext emptyList()
+            val ts = body[timeSeriesKey] as? Map<*, *> ?: return@withContext emptyList()
+            val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+            val prices = ts.entries.mapNotNull { entry ->
+                val dateStr = entry.key as? String ?: return@mapNotNull null
+                val dayMap = entry.value as? Map<*, *> ?: return@mapNotNull null
+                val closeStr = (dayMap["4. close"] ?: dayMap["4. close"])?.toString() ?: return@mapNotNull null
+                val close = closeStr.toDoubleOrNull() ?: return@mapNotNull null
+                Pair(LocalDate.parse(dateStr, formatter), close)
+            }.sortedBy { it.first }.map { it.second }
+            // take last `days` entries
+            if (prices.size <= days) prices else prices.takeLast(days)
+        } catch (e: Exception) {
+            Log.e("Repo", "fetch error", e)
+            emptyList()
+        }
+    }
+}
+
+│  │   ├─ net/AlphaVantageApi.kt
+// package com.example.smartstockwatcher.net
+import retrofit2.Call
+import retrofit2.Retrofit
+import retrofit2.converter.moshi.MoshiConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Query
+
+interface AlphaVantageApi {
+    // TIME_SERIES_DAILY adjusted (compact returns last 100 days)
+    @GET("query?function=TIME_SERIES_DAILY_ADJUSTED&outputsize=compact&datatype=json")
+    fun getDaily(@Query("symbol") symbol: String, @Query("apikey") key: String): Call<Map<String, Any>>
+
+    companion object {
+        fun create(): AlphaVantageApi {
+            val retrofit = Retrofit.Builder()
+                .baseUrl("https://www.alphavantage.co/")
+                .addConverterFactory(MoshiConverterFactory.create())
+                .build()
+            return retrofit.create(AlphaVantageApi::class.java)
+        }
+    }
+}
+
+│  │   ├─ worker/StockWorker.kt
+// package com.example.smartstockwatcher.worker
+import android.content.Context
+import androidx.work.CoroutineWorker
+import androidx.work.WorkerParameters
+import com.example.smartstockwatcher.data.AppDatabase
+import com.example.smartstockwatcher.data.Repo
+import com.example.smartstockwatcher.net.AlphaVantageApi
+import com.example.smartstockwatcher.notifications.Notifier
+import com.example.smartstockwatcher.predict.Predictor
+import com.example.smartstockwatcher.prefs.SecurePrefs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+class StockWorker(private val ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    companion object { const val WORK_NAME = "smart_stock_worker" }
+    private val db by lazy { AppDatabase.get(ctx) }
+    private val prefs by lazy { SecurePrefs(ctx) }
+    private val api by lazy { AlphaVantageApi.create() }
+    private val notifier by lazy { Notifier(ctx) }
+
+    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val key = prefs.apiKey
+        if (key.isBlank()) return@withContext Result.success() // no API key configured
+
+        // get tickers from DB (synchronously for simplicity)
+        val tickers = db.stockDao().allTickersFlow().let { /* we can't collect Flow here easily; use simple query instead in production */ emptyList<com.example.smartstockwatcher.data.TickerEntity>() }
+        // For easier demo: fallback to a static list if DB not set up:
+        val watch = listOf("AAPL", "MSFT", "GOOGL") // ideally fetch DB entries
+
+        val repo = Repo(api, key)
+        for (sym in watch) {
+            val prices = repo.fetchRecentPrices(sym, days = 60)
+            if (prices.isEmpty()) continue
+            val current = prices.last()
+            val prevClose = if (prices.size >= 2) prices[prices.size - 2] else prices.last()
+            // thresholds: in real app read per-ticker thresholds from DB
+            val buyThreshold = 0.98
+            val sellThreshold = 1.02
+
+            // buy/sell check relative to previous close
+            if (current <= prevClose * buyThreshold) {
+                notifier.alertBuy(sym, current)
+            } else if (current >= prevClose * sellThreshold) {
+                notifier.alertSell(sym, current)
+            }
+
+            // predict next price
+            val forecast = Predictor.linearForecast(prices, lookback = 20)
+            if (forecast != null) notifier.alertPrediction(sym, forecast)
+
+            // combined signal -> optional stronger alert
+            val signal = Predictor.combinedSignal(prices)
+            if (signal > 0 && forecast != null && forecast > current * 1.01) {
+                // bullish
+                notifier.alertBuy(sym, current)
+            } else if (signal < 0 && forecast != null && forecast < current * 0.99) {
+                notifier.alertSell(sym, current)
+            }
+        }
+        Result.success()
+    }
+}
+
+│  │   ├─ notifications/Notifier.kt
+// package com.example.smartstockwatcher.notifications
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+
+class Notifier(private val context: Context) {
+    private val CH_ID = "smartstock_alerts"
+    private val nm = NotificationManagerCompat.from(context)
+
+    init { createChannel() }
+
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(CH_ID, "Stock Alerts", NotificationManager.IMPORTANCE_HIGH)
+            channel.description = "Buy / Sell signals"
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    fun alertBuy(symbol: String, price: Double) {
+        val id = (System.currentTimeMillis() / 1000L % Int.MAX_VALUE).toInt()
+        val notif = NotificationCompat.Builder(context, CH_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("BUY suggested: $symbol")
+            .setContentText("$symbol at \$$price — price near buy threshold")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        nm.notify(id, notif)
+    }
+
+    fun alertSell(symbol: String, price: Double) {
+        val id = (System.currentTimeMillis() / 1000L % Int.MAX_VALUE).toInt()
+        val notif = NotificationCompat.Builder(context, CH_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("SELL suggested: $symbol")
+            .setContentText("$symbol at \$$price — price reached sell threshold")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        nm.notify(id, notif)
+    }
+
+    fun alertPrediction(symbol: String, forecast: Double) {
+        val id = (System.currentTimeMillis() / 1000L % Int.MAX_VALUE).toInt()
+        val notif = NotificationCompat.Builder(context, CH_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setContentTitle("Forecast for $symbol")
+            .setContentText("Next price forecast: \$$forecast")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        nm.notify(id, notif)
+    }
+}
+
+│  │   ├─ predict/Predictor.kt
+// package com.example.smartstockwatcher.predict
+import kotlin.math.pow
+import kotlin.math.round
+
+object Predictor {
+    // Simple moving average of last n items
+    fun sma(prices: List<Double>, n: Int): Double? {
+        if (prices.size < n) return null
+        return prices.takeLast(n).average()
+    }
+
+    // Exponential moving average with smoothing alpha
+    fun ema(prices: List<Double>, period: Int): Double? {
+        if (prices.isEmpty()) return null
+        val k = 2.0 / (period + 1)
+        var ema = prices.first()
+        for (p in prices.drop(1)) {
+            ema = p * k + ema * (1 - k)
+        }
+        return ema
+    }
+
+    // Linear regression to forecast next price (simple least-squares on equally spaced x=0..n-1)
+    fun linearForecast(prices: List<Double>, lookback: Int = 10): Double? {
+        val pts = prices.takeLast(lookback)
+        if (pts.size < 3) return null
+        val n = pts.size
+        val xMean = (0 until n).average()
+        val yMean = pts.average()
+        var num = 0.0
+        var den = 0.0
+        for (i in 0 until n) {
+            num += (i - xMean) * (pts[i] - yMean)
+            den += (i - xMean).pow(2)
+        }
+        val slope = if (den == 0.0) 0.0 else num / den
+        val intercept = yMean - slope * xMean
+        val forecast = intercept + slope * n // predict next x = n
+        return round(forecast * 100.0) / 100.0
+    }
+
+    // Combine predictors into a single "confidence" signal: +1 strong upward forecast, -1 strong downward
+    fun combinedSignal(prices: List<Double>): Int {
+        val lr = linearForecast(prices, 15) ?: return 0
+        val smaShort = sma(prices, 5) ?: lr
+        val smaLong = sma(prices, 20) ?: smaShort
+        val score = listOf(
+            if (lr > prices.last() * 1.01) 1 else 0,
+            if (smaShort > smaLong) 1 else 0
+        ).sum()
+        return when (score) { 2 -> 1; 1 -> 0; else -> -1 }
+    }
+}
+
+│  │   ├─ prefs/SecurePrefs.kt
+// package com.example.smartstockwatcher.prefs
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+
+class SecurePrefs(context: Context) {
+    private val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+    private val prefs = EncryptedSharedPreferences.create(
+        context, "smartstock_prefs", masterKey,
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    )
+    var apiKey: String
+        get() = prefs.getString("api_key", "") ?: ""
+        set(v) = prefs.edit().putString("api_key", v).apply()
+}
+
+│  ├─ res/layout (not used — Compose)
+│  ├─ res/values/strings.xml, themes, icons...
+├─ build.gradle (project)
+├─ app/build.gradle
+├─ .github/workflows/android.yml
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build Debug APK
+        run: |
+          ./gradlew assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
